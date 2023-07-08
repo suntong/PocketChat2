@@ -43,6 +43,7 @@ func broadcaster() {
 			for c := range clients {
 				cli.Out <- c.Name
 			}
+			cli.Out <- "------"
 
 		case cli := <-leaving:
 			delete(clients, cli)
@@ -71,19 +72,12 @@ func handleConn(conn net.Conn) {
 	out <- "You are " + who
 	messages <- who + " has arrived"
 	entering <- cli
-	idle := time.NewTimer(timeout)
 
-Loop:
-	for {
-		select {
-		case msg := <-in:
-			messages <- who + ": " + msg
-			idle.Reset(timeout)
-		case <-idle.C:
-			conn.Close()
-			break Loop
-		}
+	input := bufio.NewScanner(conn)
+	for input.Scan() {
+		messages <- who + ": " + input.Text()
 	}
+	// NOTE: ignoring potential errors from input.Err()
 
 	leaving <- cli
 	messages <- who + " has left"
