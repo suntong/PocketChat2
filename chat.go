@@ -1,10 +1,4 @@
-// Copyright © 2016 Alan A. A. Donovan & Brian W. Kernighan.
-// License: https://creativecommons.org/licenses/by-nc-sa/4.0/
-
-// See page 254.
-//!+
-
-// Chat is a server that lets clients chat with each other.
+// ex8.14 is a chat server that prompts clients for a name upon connection.
 package main
 
 import (
@@ -12,10 +6,15 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"time"
 )
 
-//!+broadcaster
-type client chan<- string // an outgoing message channel
+const timeout = 10 * time.Second
+
+type client struct {
+	Out  chan<- string // outgoing message channel
+	Name string
+}
 
 var (
 	entering = make(chan client)
@@ -31,38 +30,62 @@ func broadcaster() {
 			// Broadcast incoming message to all
 			// clients' outgoing message channels.
 			for cli := range clients {
-				cli <- msg
+				select {
+				case cli.Out <- msg:
+				default:
+					// Skip client if it's reading messages slowly.
+				}
 			}
 
 		case cli := <-entering:
 			clients[cli] = true
+			cli.Out <- "Present:"
+			for c := range clients {
+				cli.Out <- c.Name
+			}
 
 		case cli := <-leaving:
 			delete(clients, cli)
-			close(cli)
+			close(cli.Out)
 		}
 	}
 }
 
-//!-broadcaster
-
-//!+handleConn
 func handleConn(conn net.Conn) {
-	ch := make(chan string) // outgoing client messages
-	go clientWriter(conn, ch)
+	out := make(chan string, 10) // outgoing client messages
+	go clientWriter(conn, out)
+	in := make(chan string) // incoming client messages
+	go clientReader(conn, in)
 
-	who := conn.RemoteAddr().String()
-	ch <- "You are " + who
-	messages <- who + " has arrived"
-	entering <- ch
-
-	input := bufio.NewScanner(conn)
-	for input.Scan() {
-		messages <- who + ": " + input.Text()
+	var who string
+	nameTimer := time.NewTimer(timeout)
+	out <- "Enter your name:"
+	select {
+	case name := <-in:
+		who = name
+	case <-nameTimer.C:
+		conn.Close()
+		return
 	}
-	// NOTE: ignoring potential errors from input.Err()
+	cli := client{out, who}
+	out <- "You are " + who
+	messages <- who + " has arrived"
+	entering <- cli
+	idle := time.NewTimer(timeout)
 
-	leaving <- ch
+Loop:
+	for {
+		select {
+		case msg := <-in:
+			messages <- who + ": " + msg
+			idle.Reset(timeout)
+		case <-idle.C:
+			conn.Close()
+			break Loop
+		}
+	}
+
+	leaving <- cli
 	messages <- who + " has left"
 	conn.Close()
 }
@@ -73,9 +96,14 @@ func clientWriter(conn net.Conn, ch <-chan string) {
 	}
 }
 
-//!-handleConn
+func clientReader(conn net.Conn, ch chan<- string) {
+	input := bufio.NewScanner(conn)
+	for input.Scan() {
+		ch <- input.Text()
+	}
+	// NOTE: ignoring potential errors from input.Err()
+}
 
-//!+main
 func main() {
 	listener, err := net.Listen("tcp", "localhost:8000")
 	if err != nil {
@@ -92,5 +120,3 @@ func main() {
 		go handleConn(conn)
 	}
 }
-
-//!-main
